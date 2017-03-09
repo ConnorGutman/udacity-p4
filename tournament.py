@@ -6,61 +6,43 @@
 import psycopg2
 
 
-def connect():
+def connect(database_name="tournament"):
     # Connect to the PostgreSQL database.  Returns a database connection.
-    return psycopg2.connect("dbname=tournament")
+    try:
+        db = psycopg2.connect("dbname={}".format(database_name))
+        c = db.cursor()
+        return db, c
+    except:
+        print("<error message>")
 
 
 def deleteMatches():
     # Remove all the match records from the database.
-    conn = connect()
-    c = conn.cursor()
-    # Delete all rows in matches and set matches+wins to 0 in players table
-    c.execute("DELETE FROM matches;")
-    c.execute("UPDATE players SET wins = 0")
-    c.execute("UPDATE players SET matches = 0")
-    conn.commit()
-    conn.close()
+    db, c = connect()
+    # Delete all rows in matches
+    c.execute("TRUNCATE matches;")
+    db.commit()
+    db.close()
 
 
 def deletePlayers():
     # Remove all the player records from the database.
-    conn = connect()
-    c = conn.cursor()
+    db, c = connect()
     # Delete all rows in players and reset the sequence
-    c.execute("DELETE FROM players;")
-    c.execute("ALTER SEQUENCE players_user_id_seq RESTART WITH 1;")
-    c.execute("UPDATE players SET user_id=nextval('players_user_id_seq');")
-    conn.commit()
-    conn.close()
-
-
-"""Question for instructor: Is last_value a more efficient method for finding
-the # of users? My thought process is that if I make the code check the
-last_value from the sequence it won't have to cycle through every row in
-the players table. However, as far as I can tell there's no way to have the
-last_value column in the sequence differentiate between no users and one user.
-If I set the minimum of the sequence to 0 but the start value to 1 it still
-creates a initial user with the id 0. Therefor, I have the code only check the
-players table when a value of 1 is returned."""
+    c.execute("TRUNCATE players CASCADE;")
+    db.commit()
+    db.close()
 
 
 def countPlayers():
     # Returns the number of players currently registered.
-    conn = connect()
-    c = conn.cursor()
-    # Select last value from the player ID sequence
-    c.execute("SELECT last_value FROM players_user_id_seq")
+    db, c = connect()
+    # Get the number of rows in players
+    c.execute("SELECT COUNT(*) FROM players")
     totalPlayers = c.fetchone()
     totalPlayers = totalPlayers[0]
-    # Sequence won't return 0 so check via players table
-    if totalPlayers == 1:
-        c.execute("SELECT COUNT(*) FROM players")
-        totalPlayers = c.fetchone()
-        totalPlayers = totalPlayers[0]
-
-    conn.commit()
-    conn.close()
+    db.commit()
+    db.close()
     return totalPlayers
 
 
@@ -74,12 +56,13 @@ def registerPlayer(name):
       name: the player's full name (need not be unique).
      """
 
-    conn = connect()
-    c = conn.cursor()
-    c.execute("INSERT INTO players (name, wins, matches) VALUES (%s, %s, %s)",
-              (name, 0, 0))
-    conn.commit()
-    conn.close()
+    db, c = connect()
+    # Get the passed along name and add it to the players table
+    query = "INSERT INTO players (name) VALUES (%s)"
+    params = (name,)
+    c.execute(query, params)
+    db.commit()
+    db.close()
 
 
 def playerStandings():
@@ -96,14 +79,60 @@ def playerStandings():
         matches: the number of matches the player has played
     """
 
-    conn = connect()
-    c = conn.cursor()
-    # Select all from players table and order by most wins
-    c.execute("SELECT * FROM players ORDER BY wins DESC;")
-    rankings = c.fetchall()
-    conn.commit()
-    conn.close()
-    return rankings
+    db, c = connect()
+    # Get all of the names in the players table
+    c.execute("SELECT * FROM players;")
+    names = c.fetchall()
+    # Get the total number of players
+    totalPlayers = countPlayers()
+    # Get the total number of matches
+    c.execute("SELECT COUNT(*) FROM matches")
+    totalMatches = c.fetchall()
+    totalMatches = totalMatches[0][0]
+    # Initialize the list of tuples
+    standings = []
+    # Check if there's any recorded matches
+    if totalMatches > 0:
+        # For total number of players
+        for number in xrange(0, totalPlayers):
+            # Get ID
+            ID = number + 1
+            # Get Name
+            name = names[number][0]
+            # Get wins
+            query = "SELECT COUNT(*) FROM matches WHERE winner = %s"
+            params = (str(number + 1))
+            c.execute(query, params)
+            win_count = c.fetchall()
+            win_count = int(win_count[0][0])
+            # Get loses
+            query = "SELECT COUNT(*) FROM matches WHERE loser = %s"
+            params = (str(number + 1))
+            c.execute(query, params)
+            lose_count = c.fetchall()
+            lose_count = int(lose_count[0][0])
+            # Get number of matches
+            match_count = win_count + lose_count
+            # Create tuple
+            standing = (ID, name, win_count, match_count)
+            # Add player tuple to list
+            standings.append(standing)
+    # If there are no matches build a standard list
+    else:
+        for number in xrange(0, totalPlayers):
+            ID = number + 1
+            name = names[number][0]
+            win_count = 0
+            match_count = 0
+            # wins and matches will be 0
+            standing = (ID, name, win_count, match_count)
+            # Add player tuple to list
+            standings.append(standing)
+    db.commit()
+    db.close()
+    # Sort standings by wins
+    standings.sort(key=lambda tup: tup[2])
+    return standings
 
 
 def reportMatch(winner, loser):
@@ -113,24 +142,14 @@ def reportMatch(winner, loser):
       winner:  the id number of the player who won
       loser:  the id number of the player who lost
     """
-    conn = connect()
-    c = conn.cursor()
+    db, c = connect()
+
     # Add a new match in matches table
-    c.execute(
-        "INSERT INTO matches (player_1, player_2, winner) VALUES (%s, %s, %s)",
-        (winner, loser, winner))
-    # Add 1 point to the winner's win column in players table
-    c.execute(
-        "UPDATE players SET wins = wins + 1 WHERE user_id = %s", ([winner]))
-    # Add 1 point to the match column of both players
-    c.execute(
-        "UPDATE players SET matches = matches + 1 WHERE user_id = %s",
-        ([winner]))
-    c.execute(
-        "UPDATE players SET matches = matches + 1 WHERE user_id = %s",
-        ([loser]))
-    conn.commit()
-    conn.close()
+    query = "INSERT INTO matches (winner, loser) VALUES (%s, %s)"
+    params = (winner, loser)
+    c.execute(query, params)
+    db.commit()
+    db.close()
 
 
 def swissPairings():
@@ -156,9 +175,9 @@ def swissPairings():
     pairs = []
     # Example: 8 players would have 4 pairs
     for number in xrange(0, totalPlayers, 2):
-            # Create tuple with ID1, Name1, ID2, Name2
-            pair = (allPlayers[number][0], allPlayers[number][1],
-                    allPlayers[number+1][0], allPlayers[number+1][1])
-            # Add pair tuple to list
-            pairs.append(pair)
+        # Create tuple with ID1, Name1, ID2, Name2
+        pair = (allPlayers[number][0], allPlayers[number][1],
+                allPlayers[number + 1][0], allPlayers[number + 1][1])
+        # Add pair tuple to list
+        pairs.append(pair)
     return pairs
